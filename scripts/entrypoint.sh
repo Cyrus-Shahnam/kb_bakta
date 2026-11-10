@@ -17,7 +17,7 @@ elif [ "${1}" = "async" ] ; then
   sh ./scripts/run_async.sh
 elif [ "${1}" = "init" ] ; then
   echo "Initialize module"
-  sh ./scripts/prepare_data.sh
+  bash ./scripts/prepare_data.sh || { echo "Init failed"; exit 1; }
 elif [ "${1}" = "bash" ] ; then
   bash
 elif [ "${1}" = "report" ] ; then
