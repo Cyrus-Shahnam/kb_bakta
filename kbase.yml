@@ -8,10 +8,14 @@ service-language:
     python
 
 module-version:
-    0.0.1
+    0.1.0
 
 owners:
-    [filipeliu]
+    [filipeliu, ac.shahnam]
 
+# Reference data version = folder name under /kb/data/kb_bakta/. Bump it whenever
+# scripts/prepare_data.sh changes (DB release or full/light), otherwise KBase
+# reuses the existing folder and skips the init step.
+# 6.0.0-full = Bakta DB v6.0 (zenodo 14916843), full type.
 data-version:
-    10.5281.zenodo.14916843
+    6.0.0-full
