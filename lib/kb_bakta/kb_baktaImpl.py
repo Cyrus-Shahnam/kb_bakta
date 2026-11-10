@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+import subprocess
+import tempfile
 from pathlib import Path
 
 from installed_clients.KBaseReportClient import KBaseReport
@@ -25,53 +27,60 @@ class kb_bakta:
     # state. A method could easily clobber the state set by another while
     # the latter method is running.
     ######################################### noqa
-    VERSION = "0.0.1"
+    VERSION = "0.1.0"
     GIT_URL = "git@github.com:Fxe/kb_bakta.git"
     GIT_COMMIT_HASH = "0987738bd55827d0d9177962eea817b937d47e3e"
 
     #BEGIN_CLASS_HEADER
 
-    @staticmethod
-    def run_bakta(features: dict,
-                          output: Path = Path('/tmp/output'),
-                          tmp_protein_faa: Path = Path('/tmp/input_genome.faa')) -> Path:
+    # Reference data is built by scripts/prepare_data.sh at registration time and
+    # mounted read-only at /data when the app runs.
+    DATA_DIR = Path('/data')
+    BAKTA_DB = DATA_DIR / 'db'
 
-        with open(tmp_protein_faa, 'w') as fh:
-            for i, s in features.items():
-                fh.write(f'>{i}\n')
-                fh.write(f'{s}\n')
+    @classmethod
+    def check_bakta_db(cls):
+        version_file = cls.BAKTA_DB / 'version.json'
+        if not (cls.DATA_DIR / '__READY__').exists() or not version_file.exists():
+            raise RuntimeError(
+                f'Bakta reference data not found at {cls.BAKTA_DB}. The module must be '
+                'registered with reference data (data-version in kbase.yml) so that KBase '
+                'mounts it at /data; the app does not download the database at runtime.')
+        with open(version_file) as fh:
+            logging.info(f'Bakta DB: {json.load(fh)}')
 
-        print(f'{tmp_protein_faa} created')
+    def run_bakta(self, proteins: dict) -> dict:
+        """Run bakta_proteins on {feature_id: protein_sequence}; return the parsed JSON output."""
+        self.check_bakta_db()
 
-        print(os.listdir('/data/db'))
-        threads = 40
-        # Build cmd
+        work_dir = Path(tempfile.mkdtemp(prefix='bakta_', dir=self.shared_folder))
+        input_faa = work_dir / 'input_genome.faa'
+        output_dir = work_dir / 'output'  # must not exist yet, bakta creates it
+
+        with open(input_faa, 'w') as fh:
+            for i, s in proteins.items():
+                fh.write(f'>{i}\n{s}\n')
+        logging.info(f'{input_faa} created with {len(proteins)} proteins')
+
         cmd = [
             'bakta_proteins',
-            '--threads', str(threads),
-            '--db', '/data/db',
-            '--output', str(output),
-            str(tmp_protein_faa),
+            '--db', str(self.BAKTA_DB),
+            '--output', str(output_dir),
+            '--prefix', 'input_genome',
+            '--tmp-dir', str(work_dir),
+            '--threads', str(self.threads),
+            str(input_faa),
         ]
+        logging.info('Running: ' + ' '.join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        print(result.stdout)
+        print(result.stderr)
+        if result.returncode != 0:
+            raise RuntimeError(f'bakta_proteins failed (exit code {result.returncode}):\n'
+                               f'{result.stderr[-4000:]}')
 
-        import subprocess
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
-
-        if output.exists() and output.is_dir():
-            for f in os.listdir(output):
-                print('created:', f)
-
-        print(result)
-
-        print(result.returncode)
-        print(result.stdout.strip() if result.stdout else '')
-        print(result.stderr.strip() if result.stderr else '')
-
-        return output
+        with open(output_dir / 'input_genome.json') as fh:
+            return json.load(fh)
 
     #END_CLASS_HEADER
 
@@ -81,6 +90,7 @@ class kb_bakta:
         #BEGIN_CONSTRUCTOR
         self.callback_url = os.environ['SDK_CALLBACK_URL']
         self.shared_folder = config['scratch']
+        self.threads = os.cpu_count() or 4
         logging.basicConfig(format='%(created)s %(levelname)s: %(message)s',
                             level=logging.INFO)
         self.dfu = DataFileUtil(self.callback_url)
@@ -100,7 +110,6 @@ class kb_bakta:
         #BEGIN run_kb_bakta
 
         print(params)
-        print(ctx)
 
         dfu_get_result = self.dfu.get_objects({'object_refs': [f'{params["workspace_id"]}/{params["input_genome"]}']})
         genome_object = dfu_get_result['data'][0]['data']
@@ -116,11 +125,8 @@ class kb_bakta:
                 else:
                     raise ValueError('Duplicate feature id:', feature_id)
 
-        self.run_bakta(features)
-
-        with open('/tmp/output/input_genome.json', 'r') as fh:
-            annotation = json.load(fh)
-            print(annotation)
+        annotation = self.run_bakta(features)
+        print(annotation)
 
         report = KBaseReport(self.callback_url)
         report_info = report.create({'report': {'objects_created': [],
@@ -148,42 +154,7 @@ class kb_bakta:
         # return variables are: returnVal
         #BEGIN annotate_proteins
 
-        with open('/tmp/input_genome.faa', 'w') as fh:
-            for i, s in proteins.items():
-                fh.write(f'>{i}\n')
-                fh.write(f'{s}\n')
-
-        print('/tmp/input_genome.faa created')
-
-        print(os.listdir('/data/db'))
-        threads = 40
-        # Build cmd
-        cmd = [
-            'bakta_proteins',
-            '--threads', str(threads),
-            '--db', '/data/db',
-            '--output', f'/tmp/output',
-            '/tmp/input_genome.faa',
-        ]
-
-        import subprocess
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
-
-        print(os.listdir('/tmp/output'))
-
-        print(result)
-
-        print(result.returncode)
-        print(result.stdout.strip() if result.stdout else '')
-        print(result.stderr.strip() if result.stderr else '')
-
-        returnVal = {}
-        with open('/tmp/output/input_genome.json', 'r') as fh:
-            returnVal = json.load(fh)
+        returnVal = self.run_bakta(proteins)
 
         #END annotate_proteins
 
